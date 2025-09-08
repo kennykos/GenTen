@@ -539,6 +539,90 @@ struct MTTKRP_Dense_Row_Kernel {
 
 };
 
+template <typename ExecSpace, typename Layout>
+struct MTTKRP_Dense_Col_Kernel {
+  const TensorImpl<ExecSpace,Layout> XX;
+  const KtensorImpl<ExecSpace> uu;
+  const ttb_indx nn;
+  const FacMatrixT<ExecSpace> vv;
+  const AlgParams algParams;
+
+  MTTKRP_Dense_Col_Kernel(const TensorImpl<ExecSpace,Layout>& X_,
+                          const KtensorImpl<ExecSpace>& u_,
+                          const ttb_indx n_,
+                          const FacMatrixT<ExecSpace>& v_,
+                          const AlgParams& algParams_) :
+    XX(X_), uu(u_), nn(n_), vv(v_), algParams(algParams_) {}
+
+  template <unsigned FBS, unsigned VS>
+  void run() const
+  {
+    const TensorImpl<ExecSpace,Layout> X = XX;
+    const KtensorImpl<ExecSpace> u = uu;
+    const ttb_indx n = nn;
+    const FacMatrixT<ExecSpace> v = vv;
+
+    typedef Kokkos::TeamPolicy<ExecSpace> Policy;
+    typedef typename Policy::member_type TeamMember;
+    typedef Kokkos::View< ttb_indx**, Kokkos::LayoutRight, typename ExecSpace::scratch_memory_space , Kokkos::MemoryUnmanaged > TmpScratchSpace;
+
+    static const bool is_gpu = Genten::is_gpu_space<ExecSpace>::value;
+    static const unsigned FacBlockSize = FBS;
+    static const unsigned VectorSize = 1; // TODO is_gpu ? VS : 1;
+    static const unsigned TeamSize = is_gpu ? 128/VectorSize : 1;
+
+    /*const*/ unsigned nd = u.ndims();
+    /*const*/ unsigned nc = u.ncomponents();
+		/*const*/ unsigned ns = X.size(n);
+		/*const*/ unsigned ne = X.numel();
+		/*const*/ unsigned ne_leftover = ne/ns;
+    const ttb_indx N = (nc+TeamSize-1)/TeamSize;
+
+    const size_t bytes = TmpScratchSpace::shmem_size(TeamSize, nd);
+    Policy policy(N, TeamSize, VectorSize);
+    Kokkos::parallel_for("mttkrp_kernel",
+                         policy.set_scratch_size(0,Kokkos::PerTeam(bytes)),
+                         KOKKOS_LAMBDA(const TeamMember& team)
+    {
+      // Col of v we write to
+      const unsigned team_rank = team.team_rank();
+      const unsigned team_size = team.team_size();
+      /*const*/ ttb_indx j = team.league_rank()*team_size + team_rank;
+      if (j >= nc)
+        return;
+
+			ttb_real lambda_j = u.weights(j);
+
+      // Scratch space for storing tensor subscripts
+      TmpScratchSpace scratch(team.team_scratch(0), team_size, nd);
+      ttb_indx *sub = &scratch(team_rank, 0);
+
+			for (ttb_indx k=0; k < ns; ++k) {
+				for (ttb_indx m=0; m < nd; ++m)
+					sub[m] = 0;
+				sub[n] = k;
+				ttb_real val = 0;
+				for (ttb_indx ittr = 0; ittr < ne_leftover; ++ittr) {
+					ttb_indx i = X.sub2ind(sub);
+					ttb_real x_val = X[i];
+
+					ttb_real tmp = x_val * lambda_j;
+
+					for (ttb_indx m=0; m < nd; ++m)
+						if (m != n)
+							tmp *= u[m].entry(sub[m], j);
+					
+					val += tmp;	
+          
+					X.increment_sub(sub,n);
+				}
+				v.entry(k,j) += val;
+			}
+    });
+  }
+
+};
+
 template <typename ExecSpace>
 void mttkrp_phan(const Genten::TensorImpl<ExecSpace,Impl::TensorLayoutLeft>& X,
                  const Genten::KtensorT<ExecSpace>& u,
@@ -755,6 +839,21 @@ void Genten::mttkrp(const Genten::TensorT<ExecSpace>& X,
       Genten::Impl::MTTKRP_Dense_Row_Kernel<ExecSpace,Impl::TensorLayoutRight> kernel(
         X.right_impl(),u.impl(),n,v,algParams);
       Genten::Impl::run_row_simd_kernel(kernel, nc);
+    }
+  }
+	else if (algParams.mttkrp_method == MTTKRP_Method::ColBased) {
+    if (zero_v)
+      v = ttb_real(0.0);
+
+    if (X.has_left_impl()) {
+      Genten::Impl::MTTKRP_Dense_Col_Kernel<ExecSpace,Impl::TensorLayoutLeft> kernel(
+        X.left_impl(),u.impl(),n,v,algParams);
+      Genten::Impl::run_row_simd_kernel(kernel, X.numel()/X.size(n));
+    }
+    else {
+      Genten::Impl::MTTKRP_Dense_Col_Kernel<ExecSpace,Impl::TensorLayoutRight> kernel(
+        X.right_impl(),u.impl(),n,v,algParams);
+      Genten::Impl::run_row_simd_kernel(kernel, X.numel()/X.size(n));
     }
   }
   else if (algParams.mttkrp_method == MTTKRP_Method::Phan) {
