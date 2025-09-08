@@ -199,6 +199,7 @@ namespace Genten {
       Single,      // Single-thread algorithm (no atomics or duplication)
       Perm,        // Permutation-based algorithm
       RowBased,    // Row-based algorithm (dense)
+      ColBased,    // Col-based algorithm (dense)
       Phan         // Phan "fast" MTTKRP algorithm (dense)
     };
     static constexpr unsigned num_types = 8;
@@ -210,11 +211,12 @@ namespace Genten {
       Single,
       Perm,
       RowBased,
+			ColBased,
       Phan
     };
     static constexpr const char* names[] = {
       "default", "orig-kokkos", "atomic", "duplicated", "single", "perm",
-      "row-based", "phan"
+      "row-based", "col-based", "phan"
     };
     static constexpr type default_type = Default;
   };
